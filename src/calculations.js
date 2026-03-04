@@ -200,11 +200,45 @@ const CENTERS = {
  * @param {string} planetName - Название планеты
  * @returns {Object} Позиция планеты с воротами и линией
  */
-function calculatePlanetPosition(jd, planetName) {
+function sweJulday(year, month, day, hourDecimal) {
+  return new Promise((resolve, reject) => {
+    // Gregorian calendar
+    const cal = Swisseph.SE_GREG_CAL ?? 1;
+    Swisseph.swe_julday(year, month, day, hourDecimal, cal, (jd) => {
+      if (typeof jd !== 'number') return reject(new Error('Invalid Julian Day'));
+      resolve(jd);
+    });
+  });
+}
+
+function sweCalcUt(jd, planetIndex) {
+  return new Promise((resolve, reject) => {
+    const flags = Swisseph.SEFLG_SPEED ?? 256;
+    Swisseph.swe_calc_ut(jd, planetIndex, flags, (res) => {
+      if (!res) return reject(new Error('swe_calc_ut returned empty result'));
+      if (res.error) return reject(new Error(res.error));
+      resolve(res);
+    });
+  });
+}
+async function calculatePlanetPosition(jd, planetName) {
   try {
     const planetIndex = getPlanetIndex(planetName);
-    const position = Swisseph.calc_ut(jd, planetIndex);
-    const longitude = position.longitude;
+    const position = await sweCalcUt(jd, planetIndex);
+
+    // swisseph geeft vaak een array terug in position.longitude of position[0]
+    const longitude =
+      typeof position.longitude === 'number'
+        ? position.longitude
+        : Array.isArray(position.longitude)
+          ? position.longitude[0]
+          : Array.isArray(position)
+            ? position[0]
+            : position?.xx?.[0];
+
+    if (typeof longitude !== 'number') {
+      throw new Error('Longitude not found in swisseph response');
+    }
     
     // Human Design использует тропический зодиак (не сидерический)
     const sign = Math.floor(longitude / 30) + 1;
@@ -267,7 +301,7 @@ export async function calculateHumanDesign({
     const [hour, minute] = birthTime.split(':').map(Number);
     
     // Конвертация в Юлианскую дату
-    const jd = Swisseph.julday(year, month, day, hour + minute / 60, 1); // Gregorian calendar
+    const jd = await sweJulday(year, month, day, hour + minute / 60); // Gregorian calendar
     
     // Расчет позиций всех планет
     const planets = [
@@ -282,9 +316,9 @@ export async function calculateHumanDesign({
       'Ketu',
     ];
     
-    const planetPositions = planets.map(planet => 
-      calculatePlanetPosition(jd, planet)
-    ).filter(p => p !== null);
+const planetPositions = (await Promise.all(
+  planets.map(planet => calculatePlanetPosition(jd, planet))
+)).filter(p => p !== null);
     
     // Определение ворот (активных)
     const gates = planetPositions.map(p => ({
