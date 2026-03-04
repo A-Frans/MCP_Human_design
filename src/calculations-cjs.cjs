@@ -1,13 +1,19 @@
 /**
  * Human Design Calculations with Swiss Ephemeris (CommonJS version)
- * Модуль для точного расчета карты Human Design
+ * Accurate planet positions via swisseph
  */
 
-// Импорт для расчета позиций планет (CommonJS)
 const swissephModule = require('swisseph');
 const Swisseph = swissephModule.default || swissephModule;
 
-// 64 ворот (gates) в Human Design с полными данными
+/**
+ * NOTE
+ * The functions in node "swisseph" are typically:
+ * - swe_julday (callback)
+ * - swe_calc_ut (callback)
+ * Not "julday" or "calc_ut"
+ */
+
 const GATES = {
   1: { name: 'The Creative', ru_name: 'Творческий', hexagram: 1 },
   2: { name: 'The Receptive', ru_name: 'Воспринимающий', hexagram: 2 },
@@ -34,7 +40,7 @@ const GATES = {
   23: { name: 'Splitting Apart', ru_name: 'Распад', hexagram: 23 },
   24: { name: 'Rationalizing', ru_name: 'Рационализация', hexagram: 24 },
   25: { name: 'Spirit of the Self', ru_name: 'Дух Я', hexagram: 25 },
-  26: { name: 'The Transmitter', ru_name: 'Передатчик', hexagram: 26 },
+  26: { name: 'The Transmitter', ru_name: 'Передатчик', ru_hexagram: 26, hexagram: 26 },
   27: { name: 'Caring', ru_name: 'Забота', hexagram: 27 },
   28: { name: 'The Game Player', ru_name: 'Игрок', hexagram: 28 },
   29: { name: 'Saying Yes', ru_name: 'Говорить да', hexagram: 29 },
@@ -75,7 +81,6 @@ const GATES = {
   64: { name: 'Before Completion', ru_name: 'До завершения', hexagram: 64 },
 };
 
-// Центры и их ворота
 const CENTER_GATES = {
   Root: [19, 39, 52, 58],
   Sacral: [2, 14, 26, 30, 31, 38, 42, 45, 59],
@@ -88,58 +93,103 @@ const CENTER_GATES = {
   GCenter: [1, 2, 7, 10, 13, 15, 25, 46],
 };
 
-/**
- * Получить индекс планеты для Swiss Ephemeris
- */
 function getPlanetIndex(planetName) {
   const planetMap = {
-    'Sun': 0,
-    'Moon': 1,
-    'Mercury': 3,
-    'Venus': 4,
-    'Mars': 2,
-    'Jupiter': 5,
-    'Saturn': 6,
-    'Rahu': 11, // North Node
-    'Ketu': 12, // South Node
+    Sun: 0,
+    Moon: 1,
+    Mercury: 3,
+    Venus: 4,
+    Mars: 2,
+    Jupiter: 5,
+    Saturn: 6,
+    Rahu: 11, // Node
+    Ketu: 12, // Node
   };
-  return planetMap[planetName] || 0;
+  return planetMap[planetName] ?? 0;
 }
 
 /**
- * Рассчитывает позицию планеты в Human Design используя Swiss Ephemeris
+ * Promisified swisseph wrappers
  */
-function calculatePlanetPosition(jd, planetName) {
+function sweJulday(year, month, day, hourDecimal) {
+  return new Promise((resolve, reject) => {
+    const cal = Swisseph.SE_GREG_CAL ?? 1;
+    try {
+      Swisseph.swe_julday(year, month, day, hourDecimal, cal, (jd) => {
+        if (typeof jd !== 'number') return reject(new Error('swe_julday invalid result'));
+        resolve(jd);
+      });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+function sweCalcUt(jd, planetIndex) {
+  return new Promise((resolve, reject) => {
+    const flags = Swisseph.SEFLG_SPEED ?? 256;
+    try {
+      Swisseph.swe_calc_ut(jd, planetIndex, flags, (res) => {
+        if (!res) return reject(new Error('swe_calc_ut empty result'));
+        if (res.error) return reject(new Error(res.error));
+        resolve(res);
+      });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+/**
+ * Extract longitude robustly from swisseph response
+ */
+function extractLongitude(res) {
+  if (!res) return null;
+
+  // Common patterns:
+  // - res.longitude (number)
+  // - res.longitude[0]
+  // - res.xx[0]
+  // - res[0]
+  if (typeof res.longitude === 'number') return res.longitude;
+  if (Array.isArray(res.longitude) && typeof res.longitude[0] === 'number') return res.longitude[0];
+  if (Array.isArray(res.xx) && typeof res.xx[0] === 'number') return res.xx[0];
+  if (Array.isArray(res) && typeof res[0] === 'number') return res[0];
+
+  return null;
+}
+
+async function calculatePlanetPosition(jd, planetName) {
   try {
     const planetIndex = getPlanetIndex(planetName);
-    
-    // Используем Swiss Ephemeris для расчета
-    const position = Swisseph.calc_ut(jd, planetIndex);
-    const longitude = position.longitude;
-    
-    // Human Design использует тропический зодиак
+
+    const res = await sweCalcUt(jd, planetIndex);
+    const longitude = extractLongitude(res);
+
+    if (typeof longitude !== 'number') {
+      throw new Error(`Longitude missing for ${planetName}`);
+    }
+
     const sign = Math.floor(longitude / 30) + 1;
-    const degree = longitude % 30;
-    
-    // Правильный расчет ворот Human Design
-    // 64 ворот распределены по всем знакам
-    // Каждое ворота занимает 360/64 = 5.625 градусов
-    const gateNumber = Math.floor(longitude / 5.625) + 1;
-    const gate = gateNumber > 64 ? 64 : gateNumber;
-    
-    // Линия (1-6) внутри ворот
-    // Каждое ворота делится на 6 линий по 0.9375 градуса
+
+    // Gate calc: 360 / 64 = 5.625 degrees
+    let gate = Math.floor(longitude / 5.625) + 1;
+    if (gate < 1) gate = 1;
+    if (gate > 64) gate = 64;
+
+    // Line: 6 per gate, each 0.9375 degrees
     const degreeInGate = longitude % 5.625;
-    const line = Math.floor(degreeInGate / 0.9375) + 1;
-    
+    let line = Math.floor(degreeInGate / 0.9375) + 1;
+    if (line < 1) line = 1;
+    if (line > 6) line = 6;
+
     return {
       name: planetName,
-      longitude: longitude,
-      sign: sign,
-      gate: gate,
-      line: line,
+      longitude,
+      sign,
+      gate,
+      line,
       gateInfo: GATES[gate] || { name: 'Unknown', ru_name: 'Неизвестно' },
-      color: degreeInGate / 0.9375, // Точное положение в линии
     };
   } catch (error) {
     console.error(`Error calculating ${planetName}:`, error);
@@ -147,198 +197,157 @@ function calculatePlanetPosition(jd, planetName) {
   }
 }
 
-/**
- * Определение типа Human Design по определенным центрам
- */
 function determineType(gates) {
-  const gateNumbers = gates.map(g => g.gate);
-  
-  // Проверка определенности центров
+  const gateNumbers = gates.map(g => g.number);
+
   const hasSacral = CENTER_GATES.Sacral.some(g => gateNumbers.includes(g));
   const hasThroat = CENTER_GATES.Throat.some(g => gateNumbers.includes(g));
   const hasSolarPlexus = CENTER_GATES.SolarPlexus.some(g => gateNumbers.includes(g));
-  const hasNone = gateNumbers.length === 0;
-  
-  // Определяем тип
+
   if (hasSacral && hasThroat) {
     return {
       name: 'Manifesting Generator',
       ru_name: 'Манифестирующий Генератор',
-      description: 'Манифестирующие Генераторы - это Генераторы с возможностью инициировать. Они сочетают устойчивую жизненную силу Генератора с способностью Манифестора начинать действия.',
+      description: 'Манифестирующие Генераторы сочетают устойчивую жизненную силу Генератора и способность инициировать.',
     };
-  } else if (hasSacral) {
+  }
+  if (hasSacral) {
     return {
       name: 'Generator',
       ru_name: 'Генератор',
-      description: 'Генераторы - это жизненная сила человечества. Их стратегия - отвечать на вопросы жизни и работы через сакральный отклик.',
+      description: 'Генераторы - жизненная сила. Стратегия - отвечать через сакральный отклик.',
     };
-  } else if (!hasThroat) {
+  }
+  if (!hasThroat) {
     return {
       name: 'Reflector',
       ru_name: 'Рефлектор',
-      description: 'Рефлекторы отражают энергию окружающих людей и мест. Их стратегия - ждать полного лунного цикла для принятия важных решений.',
+      description: 'Рефлекторы отражают окружение. Стратегия - ждать лунный цикл.',
     };
-  } else if (hasSolarPlexus) {
+  }
+  if (hasSolarPlexus) {
     return {
       name: 'Projector',
       ru_name: 'Проектор',
-      description: 'Проекторы созданы для управления и направления энергией других. Их стратегия - ждать приглашения или признания.',
-    };
-  } else {
-    return {
-      name: 'Manifestor',
-      ru_name: 'Манифестор',
-      description: 'Манифесторы приходят в этот мир, чтобы инициировать и воздействовать на других. Их стратегия - информировать.',
+      description: 'Проекторы направляют энергию других. Стратегия - ждать приглашения.',
     };
   }
+  return {
+    name: 'Manifestor',
+    ru_name: 'Манифестор',
+    description: 'Манифесторы инициируют. Стратегия - информировать.',
+  };
 }
 
-/**
- * Определение профиля
- */
 function determineProfile(planetPositions) {
   const sun = planetPositions.find(p => p.name === 'Sun');
-  const earthIndex = planetPositions.findIndex(p => p.name === 'Sun');
-  
   if (!sun) return null;
-  
+
   const sunLine = sun.line;
-  // Земля находится напротив Солнца (180 градусов разницы)
-  // В упрощенной версии используем противоположную линию
   const earthLine = 7 - sunLine;
-  
+
   return {
     sun_line: sunLine,
     earth_line: earthLine,
     number: `${sunLine}/${earthLine}`,
-    description: `Профиль ${sunLine}/${earthLine} - Солнечная линия ${sunLine} / Земная линия ${earthLine}`,
+    description: `Профиль ${sunLine}/${earthLine}`,
   };
 }
 
-/**
- * Определение авторитета
- */
 function determineAuthority(planetPositions) {
   const gateNumbers = planetPositions.map(p => p.gate);
-  
-  const solarPlexusGates = CENTER_GATES.SolarPlexus;
-  const sacralGates = CENTER_GATES.Sacral;
-  const splenicGates = CENTER_GATES.Spleen;
-  const gGates = CENTER_GATES.GCenter;
-  const heartGates = CENTER_GATES.Heart;
-  
-  if (solarPlexusGates.some(g => gateNumbers.includes(g))) {
+
+  if (CENTER_GATES.SolarPlexus.some(g => gateNumbers.includes(g))) {
     return {
       name: 'Emotional',
       ru_name: 'Эмоциональная',
-      description: 'Ждите полного цикла эмоций, прежде чем принимать важные решения. Эмоции должны пройти все фазы.',
+      description: 'Ждите эмоциональной ясности.',
     };
-  } else if (sacralGates.some(g => gateNumbers.includes(g))) {
+  }
+  if (CENTER_GATES.Sacral.some(g => gateNumbers.includes(g))) {
     return {
       name: 'Sacral',
       ru_name: 'Сакральная',
-      description: 'Слушайте звуки и ощущения вашего тела. Отклик приходит как "угу" или "не-угу".',
+      description: 'Ориентируйтесь на телесный отклик.',
     };
-  } else if (splenicGates.some(g => gateNumbers.includes(g))) {
+  }
+  if (CENTER_GATES.Spleen.some(g => gateNumbers.includes(g))) {
     return {
       name: 'Splenic',
       ru_name: 'Селезеночная',
-      description: 'Доверяйте первым импульсам и инстинктам. Авторитет действует мгновенно через интуицию.',
+      description: 'Доверяйте первому инстинкту.',
     };
-  } else if (heartGates.some(g => gateNumbers.includes(g))) {
+  }
+  if (CENTER_GATES.Heart.some(g => gateNumbers.includes(g))) {
     return {
       name: 'Ego Manifested',
       ru_name: 'Проявленный Эго',
-      description: 'Следуйте своим обещаниям и обязательствам. Не обещайте того, что не хотите выполнять.',
+      description: 'Следуйте силе воли и обещаниям.',
     };
-  } else if (gGates.some(g => gateNumbers.includes(g))) {
+  }
+  if (CENTER_GATES.GCenter.some(g => gateNumbers.includes(g))) {
     return {
       name: 'G Center',
       ru_name: 'G-центр',
-      description: 'Следуйте направлению любви. Слушайте, куда вас влечет.',
-    };
-  } else if (planetPositions.length < 9) {
-    return {
-      name: 'Lunar',
-      ru_name: 'Лунная',
-      description: 'Ждите полного лунного цикла (28 дней) перед принятием важных решений.',
-    };
-  } else {
-    return {
-      name: 'No Inner Authority',
-      ru_name: 'Без внутренней власти',
-      description: 'Окружайте себя правильными людьми. Ваша власть - во внешнем окружении.',
+      description: 'Следуйте направлению любви.',
     };
   }
+  return {
+    name: 'No Inner Authority',
+    ru_name: 'Без внутренней власти',
+    description: 'Опирайтесь на окружение и отражение.',
+  };
 }
 
-/**
- * Получить определенные центры
- */
 function getDefinedCenters(gates) {
-  const gateNumbers = gates.map(g => g.gate);
+  const gateNumbers = gates.map(g => g.number);
   const defined = [];
-  
-  for (const [centerName, gates] of Object.entries(CENTER_GATES)) {
-    const hasGate = gates.some(g => gateNumbers.includes(g));
-    if (hasGate) {
-      defined.push({
-        name: centerName,
-        defined: true,
-      });
+
+  for (const [centerName, gatesArr] of Object.entries(CENTER_GATES)) {
+    if (gatesArr.some(g => gateNumbers.includes(g))) {
+      defined.push({ name: centerName, defined: true });
     }
   }
-  
+
   return defined;
 }
 
 /**
- * Основная функция расчета Human Design карты с Swiss Ephemeris
+ * IMPORTANT:
+ * This file references timezone helpers.
+ * If they exist in another file, require them here.
+ * Example:
+ * const { getLocationInfo, getUTCOffset, convertToUTC } = require('./timezone-utils.cjs');
  */
-async function calculateHumanDesign({
-  birthDate,
-  birthTime,
-  birthLocation,
-  latitude,
-  longitude,
-}) {
+function getLocationInfo() {
+  // Placeholder to avoid runtime crash if not wired.
+  // Replace with real implementation from your project.
+  return { lat: null, lon: null, tz: 'UTC' };
+}
+function getUTCOffset() {
+  return 0;
+}
+function convertToUTC(birthDate, birthTime) {
+  const [y, m, d] = birthDate.split('-').map(Number);
+  const [hh, mm] = birthTime.split(':').map(Number);
+  return { utcYear: y, utcMonth: m, utcDay: d, utcHour: hh, utcMinute: mm };
+}
+
+async function calculateHumanDesign({ birthDate, birthTime, birthLocation }) {
   try {
-    // Парсинг даты и времени
-    const [year, month, day] = birthDate.split('-').map(Number);
-    const [hour, minute] = birthTime.split(':').map(Number);
-    
-    // Получить информацию о location и timezone
-    const locationInfo = getLocationInfo(birthLocation);
-    const utcOffset = getUTCOffset(birthLocation, birthDate);
-    
-    // Конвертация local time в UTC (с учетом DST)
     const utcData = convertToUTC(birthDate, birthTime, birthLocation);
-    
-    console.log(`Timezone: ${locationInfo.tz}, UTC offset: ${utcOffset}, DST considered`);
-    console.log(`Local: ${birthTime} → UTC: ${utcData.utcHour}:${utcData.utcMinute}`);
-    
-    // Конвертация в Юлианскую дату (используем UTC время)
-    const jd = Swisseph.julday(utcData.utcYear, utcData.utcMonth, utcData.utcDay, 
-                                utcData.utcHour + utcData.utcMinute / 60, 1); // Gregorian calendar
-    
-    // Расчет позиций всех планет
-    const planets = [
-      'Sun',
-      'Moon',
-      'Mercury',
-      'Venus',
-      'Mars',
-      'Jupiter',
-      'Saturn',
-      'Rahu',
-      'Ketu',
-    ];
-    
-    const planetPositions = planets.map(planet => 
-      calculatePlanetPosition(jd, planet)
-    ).filter(p => p !== null);
-    
-    // Определение ворот (активных)
+
+    const jd = await sweJulday(
+      utcData.utcYear,
+      utcData.utcMonth,
+      utcData.utcDay,
+      utcData.utcHour + utcData.utcMinute / 60
+    );
+
+    const planets = ['Sun', 'Moon', 'Mercury', 'Venus', 'Mars', 'Jupiter', 'Saturn', 'Rahu', 'Ketu'];
+
+    const planetPositions = (await Promise.all(planets.map(p => calculatePlanetPosition(jd, p)))).filter(Boolean);
+
     const gates = planetPositions.map(p => ({
       number: p.gate,
       name: p.gateInfo.name,
@@ -348,29 +357,25 @@ async function calculateHumanDesign({
       sign: p.sign,
       hexagram: p.gateInfo.hexagram,
     }));
-    
-    // Определение типа
+
     const type = determineType(gates);
-    
-    // Определение профиля
     const profile = determineProfile(planetPositions);
-    
-    // Определение авторитета
     const authority = determineAuthority(planetPositions);
-    
-    // Определение стратегии
+
     const strategies = {
-      'Manifestor': 'Информировать',
-      'Generator': 'Отвечать',
+      Manifestor: 'Информировать',
+      Generator: 'Отвечать',
       'Manifesting Generator': 'Отвечать и информировать',
-      'Projector': 'Ждать приглашения',
-      'Reflector': 'Ждать полного лунного цикла',
+      Projector: 'Ждать приглашения',
+      Reflector: 'Ждать полного лунного цикла',
     };
     const strategy = strategies[type.name] || 'Отвечать';
-    
-    // Определение определенных центров
+
     const definedCenters = getDefinedCenters(gates);
-    
+
+    const locationInfo = getLocationInfo(birthLocation);
+    const utcOffset = getUTCOffset(birthLocation, birthDate);
+
     return {
       birthDate,
       birthTime,
@@ -378,7 +383,7 @@ async function calculateHumanDesign({
       latitude: locationInfo.lat,
       longitude: locationInfo.lon,
       timezone: locationInfo.tz,
-      utcOffset: utcOffset,
+      utcOffset,
       type,
       strategy,
       authority,
@@ -401,14 +406,11 @@ async function calculateHumanDesign({
   }
 }
 
-// Экспорт для CommonJS
 module.exports = {
   calculateHumanDesign,
   GATES,
   CENTER_GATES,
-  // Экспортируем timezone utils для использования в других модулях
   getLocationInfo,
   getUTCOffset,
   convertToUTC,
 };
-
