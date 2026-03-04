@@ -4,7 +4,8 @@
  */
 
 // Импорт для расчета позиций планет
-import Swisseph from 'swisseph';
+import swissephModule from 'swisseph';
+const Swisseph = swissephModule?.default || swissephModule;
 
 // Примечание: Для работы с CommonJS модулем swisseph может потребоваться динамический импорт
 // или использование require в CommonJS контексте
