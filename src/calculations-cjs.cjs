@@ -6,6 +6,11 @@
 // Импорт для расчета позиций планет (CommonJS)
 const Swisseph = require('swisseph');
 const { getLocationInfo, getUTCOffset, convertToUTC } = require('./timezone-utils.cjs');
+console.log("SWISSEPH KEYS:", Object.keys(Swisseph || {}));
+console.log("julday:", typeof Swisseph?.julday);
+console.log("swe_julday:", typeof Swisseph?.swe_julday);
+console.log("calc_ut:", typeof Swisseph?.calc_ut);
+console.log("swe_calc_ut:", typeof Swisseph?.swe_calc_ut);
 
 // 64 ворот (gates) в Human Design с полными данными
 const GATES = {
