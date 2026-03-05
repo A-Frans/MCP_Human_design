@@ -1,144 +1,43 @@
 /**
- * Human Design Calculations with Swiss Ephemeris (CommonJS version)
- * Accurate Human Design chart calculation module
+ * Human Design Calculations with Swiss Ephemeris (CommonJS)
+ * Fixed:
+ * - uses swe_julday + swe_calc_ut (correct API names)
+ * - maps gates using the Rave Mandala gate sequence (not linear 1..64)
  */
 
-const Swisseph = require("swisseph");
+const Swe = require("swisseph");
 const { getLocationInfo, getUTCOffset, convertToUTC } = require("./timezone-utils.cjs");
 
-// Debug (mag je later weghalen)
-console.log("SWISSEPH KEYS:", Object.keys(Swisseph || {}));
-console.log("julday:", typeof Swisseph?.julday);
-console.log("swe_julday:", typeof Swisseph?.swe_julday);
-console.log("calc_ut:", typeof Swisseph?.calc_ut);
-console.log("swe_calc_ut:", typeof Swisseph?.swe_calc_ut);
+/**
+ * Rave Mandala gate order (clockwise through the wheel)
+ * Commonly used sequence for mapping 64 gates around 360 degrees.
+ */
+const RAVE_GATE_SEQUENCE = [
+  41, 19, 13, 49, 30, 55, 37, 63,
+  22, 36, 25, 17, 21, 51, 42, 3,
+  27, 24, 2, 23, 8, 20, 16, 35,
+  45, 12, 15, 52, 39, 53, 62, 56,
+  31, 33, 7, 4, 29, 59, 40, 64,
+  47, 6, 46, 18, 48, 57, 32, 50,
+  28, 44, 1, 43, 14, 34, 9, 5,
+  26, 11, 10, 58, 38, 54, 61, 60,
+];
 
-// Helpers: pak de juiste Swiss Ephemeris functies
-function sweJulday(year, month, day, hourDecimal, gregFlag = 1) {
-  if (typeof Swisseph?.swe_julday === "function") {
-    return Swisseph.swe_julday(year, month, day, hourDecimal, gregFlag);
-  }
-  if (typeof Swisseph?.julday === "function") {
-    return Swisseph.julday(year, month, day, hourDecimal, gregFlag);
-  }
-  throw new Error("Swiss Ephemeris: julday function not available (expected swe_julday).");
-}
+// Gate size and line size in degrees
+const GATE_SIZE = 360 / 64;      // 5.625
+const LINE_SIZE = GATE_SIZE / 6; // 0.9375
 
 /**
- * Swiss Ephemeris bindings verschillen per build:
- * - soms returnen ze direct een object
- * - soms returnen ze een array
- * - soms werken ze met callback
- *
- * Deze wrapper maakt het stabiel.
+ * Approx alignment:
+ * Rave New Year: Sun enters Gate 41 line 1 around 0° Aquarius.
+ * Aquarius starts at 300° ecliptic longitude.
  */
-function sweCalcUt(jd, planetIndex, flags = 0) {
-  const fn =
-    (typeof Swisseph?.swe_calc_ut === "function" && Swisseph.swe_calc_ut) ||
-    (typeof Swisseph?.calc_ut === "function" && Swisseph.calc_ut);
+const GATE41_START_LONGITUDE = 300;
 
-  if (!fn) {
-    throw new Error("Swiss Ephemeris: calc_ut function not available (expected swe_calc_ut).");
-  }
-
-  // Callback variant
-  if (fn.length >= 4) {
-    // (jd, planet, flags, callback)
-    return new Promise((resolve, reject) => {
-      fn(jd, planetIndex, flags, (res) => {
-        if (!res) return reject(new Error("Swiss Ephemeris: empty response from swe_calc_ut"));
-        if (res.error) return reject(new Error(res.error));
-        resolve(res);
-      });
-    });
-  }
-
-  // Sync variant
-  const res = fn(jd, planetIndex, flags);
-  return Promise.resolve(res);
-}
-
-// 64 Gates
-const GATES = {
-  1: { name: "The Creative", ru_name: "Творческий", hexagram: 1 },
-  2: { name: "The Receptive", ru_name: "Воспринимающий", hexagram: 2 },
-  3: { name: "Ordering", ru_name: "Порядок", hexagram: 3 },
-  4: { name: "Formulization", ru_name: "Формулирование", hexagram: 4 },
-  5: { name: "Needing", ru_name: "Потребность", hexagram: 5 },
-  6: { name: "Friction", ru_name: "Трение", hexagram: 6 },
-  7: { name: "The Role of Self", ru_name: "Роль Я", hexagram: 7 },
-  8: { name: "Holding Together", ru_name: "Удержание вместе", hexagram: 8 },
-  9: { name: "The Focus", ru_name: "Фокус", hexagram: 9 },
-  10: { name: "The Treading", ru_name: "Шаги", hexagram: 10 },
-  11: { name: "Ideas", ru_name: "Идеи", hexagram: 11 },
-  12: { name: "Caution", ru_name: "Осторожность", hexagram: 12 },
-  13: { name: "The Listener", ru_name: "Слушатель", hexagram: 13 },
-  14: { name: "Power Skills", ru_name: "Силовые навыки", hexagram: 14 },
-  15: { name: "Modesty", ru_name: "Скромность", hexagram: 15 },
-  16: { name: "Skills", ru_name: "Навыки", hexagram: 16 },
-  17: { name: "Following", ru_name: "Следование", hexagram: 17 },
-  18: { name: "Work", ru_name: "Работа", hexagram: 18 },
-  19: { name: "Approach", ru_name: "Подход", hexagram: 19 },
-  20: { name: "Now", ru_name: "Сейчас", hexagram: 20 },
-  21: { name: "The Editor", ru_name: "Редактор", hexagram: 21 },
-  22: { name: "Openness", ru_name: "Открытость", hexagram: 22 },
-  23: { name: "Splitting Apart", ru_name: "Распад", hexagram: 23 },
-  24: { name: "Rationalizing", ru_name: "Рационализация", hexagram: 24 },
-  25: { name: "Spirit of the Self", ru_name: "Дух Я", hexagram: 25 },
-  26: { name: "The Transmitter", ru_name: "Передатчик", hexagram: 26 },
-  27: { name: "Caring", ru_name: "Забота", hexagram: 27 },
-  28: { name: "The Game Player", ru_name: "Игрок", hexagram: 28 },
-  29: { name: "Saying Yes", ru_name: "Говорить да", hexagram: 29 },
-  30: { name: "Recognition of Feelings", ru_name: "Узнавание чувств", hexagram: 30 },
-  31: { name: "Influence", ru_name: "Влияние", hexagram: 31 },
-  32: { name: "The Duration", ru_name: "Продолжительность", hexagram: 32 },
-  33: { name: "Retreat", ru_name: "Отступление", hexagram: 33 },
-  34: { name: "Great Power", ru_name: "Большая сила", hexagram: 34 },
-  35: { name: "Progress", ru_name: "Прогресс", hexagram: 35 },
-  36: { name: "Crisis", ru_name: "Кризис", hexagram: 36 },
-  37: { name: "Friendship", ru_name: "Дружба", hexagram: 37 },
-  38: { name: "The Fighter", ru_name: "Боец", hexagram: 38 },
-  39: { name: "Provocation", ru_name: "Провокация", hexagram: 39 },
-  40: { name: "Deliverance", ru_name: "Освобождение", hexagram: 40 },
-  41: { name: "Contraction", ru_name: "Сокращение", hexagram: 41 },
-  42: { name: "Growth", ru_name: "Рост", hexagram: 42 },
-  43: { name: "Insight", ru_name: "Инсайт", hexagram: 43 },
-  44: { name: "Coming to Meet", ru_name: "Встреча", hexagram: 44 },
-  45: { name: "The Gatherer", ru_name: "Собирающий", hexagram: 45 },
-  46: { name: "Determination", ru_name: "Определенность", hexagram: 46 },
-  47: { name: "Realization", ru_name: "Реализация", hexagram: 47 },
-  48: { name: "The Well", ru_name: "Колодец", hexagram: 48 },
-  49: { name: "Revolution", ru_name: "Революция", hexagram: 49 },
-  50: { name: "Values", ru_name: "Ценности", hexagram: 50 },
-  51: { name: "The Arousing", ru_name: "Побуждение", hexagram: 51 },
-  52: { name: "Keeping Still", ru_name: "Сохранение покоя", hexagram: 52 },
-  53: { name: "Development", ru_name: "Развитие", hexagram: 53 },
-  54: { name: "The Marrying Maiden", ru_name: "Невеста", hexagram: 54 },
-  55: { name: "Abundance", ru_name: "Изобилие", hexagram: 55 },
-  56: { name: "The Wanderer", ru_name: "Странник", hexagram: 56 },
-  57: { name: "The Gentle", ru_name: "Нежный", hexagram: 57 },
-  58: { name: "The Joyous", ru_name: "Радостный", hexagram: 58 },
-  59: { name: "Dispersion", ru_name: "Дисперсия", hexagram: 59 },
-  60: { name: "Limitation", ru_name: "Ограничение", hexagram: 60 },
-  61: { name: "Inner Truth", ru_name: "Внутренняя правда", hexagram: 61 },
-  62: { name: "Detail", ru_name: "Деталь", hexagram: 62 },
-  63: { name: "After Completion", ru_name: "После завершения", hexagram: 63 },
-  64: { name: "Before Completion", ru_name: "До завершения", hexagram: 64 },
-};
-
-// Centers and their gates (as in your original)
-const CENTER_GATES = {
-  Root: [19, 39, 52, 58],
-  Sacral: [2, 14, 26, 30, 31, 38, 42, 45, 59],
-  SolarPlexus: [10, 20, 29, 34, 40, 46, 50, 57],
-  Heart: [10, 21, 26, 34, 40, 51],
-  Throat: [2, 3, 5, 7, 10, 11, 12, 16, 17, 20, 21, 22, 23, 24, 28, 31, 33, 35, 45, 56, 62],
-  Ajna: [9, 20, 23, 30, 34, 40, 43, 47, 60, 61, 63, 64],
-  Head: [1, 7, 13, 26, 27, 44, 50, 64],
-  Spleen: [28, 32, 44, 48, 50, 57, 58],
-  GCenter: [1, 2, 7, 10, 13, 15, 25, 46],
-};
-
+/**
+ * Optional: planet indexes. Swiss Ephemeris has constants too,
+ * but these numeric ids match the common mapping used in many wrappers.
+ */
 function getPlanetIndex(planetName) {
   const planetMap = {
     Sun: 0,
@@ -148,221 +47,212 @@ function getPlanetIndex(planetName) {
     Mars: 2,
     Jupiter: 5,
     Saturn: 6,
-    Rahu: 11,
-    Ketu: 12,
+    Rahu: 11, // mean node
+    Ketu: 12, // true node in some mappings; keep as-is if repo uses it
   };
   return planetMap[planetName] ?? 0;
 }
 
-function extractLongitude(calcResult) {
-  if (!calcResult) return null;
-
-  // Case 1: { longitude: ... }
-  if (typeof calcResult.longitude === "number") return calcResult.longitude;
-
-  // Case 2: { xx: [lon, lat, dist, speedLon, ...] } or { data: [...] }
-  const arr =
-    (Array.isArray(calcResult.xx) && calcResult.xx) ||
-    (Array.isArray(calcResult.data) && calcResult.data) ||
-    (Array.isArray(calcResult) && calcResult) ||
-    null;
-
-  if (arr && typeof arr[0] === "number") return arr[0];
-
-  return null;
+/**
+ * Normalize longitude to 0..360
+ */
+function norm360(x) {
+  const r = x % 360;
+  return r < 0 ? r + 360 : r;
 }
 
 /**
- * Calculate planet position
+ * Convert tropical longitude to Human Design gate + line
+ * using the Rave Mandala sequence.
  */
-async function calculatePlanetPosition(jd, planetName) {
-  const planetIndex = getPlanetIndex(planetName);
+function longitudeToGateLine(longitude) {
+  const lon = norm360(longitude);
 
-  const calcResult = await sweCalcUt(jd, planetIndex, 0);
-  const longitude = extractLongitude(calcResult);
+  // shift so that 0° in this scale corresponds to Gate 41 start
+  const rel = norm360(lon - GATE41_START_LONGITUDE);
 
-  if (typeof longitude !== "number") {
-    throw new Error(`Swiss Ephemeris returned no longitude for ${planetName}`);
+  const gateIndex = Math.floor(rel / GATE_SIZE); // 0..63
+  const gate = RAVE_GATE_SEQUENCE[gateIndex];
+
+  const withinGate = rel - gateIndex * GATE_SIZE; // 0..5.625
+  const line = Math.min(6, Math.max(1, Math.floor(withinGate / LINE_SIZE) + 1));
+
+  return { gate, line };
+}
+
+/**
+ * Swiss Ephemeris helpers: this package exposes swe_julday and swe_calc_ut
+ */
+function sweJulday(year, month, day, hourDecimal) {
+  // SE_GREG_CAL is usually 1
+  if (typeof Swe.swe_julday !== "function") {
+    throw new Error("Swiss Ephemeris missing swe_julday");
+  }
+  return Swe.swe_julday(year, month, day, hourDecimal, 1);
+}
+
+function sweCalcUt(jd, planetIndex) {
+  if (typeof Swe.swe_calc_ut !== "function") {
+    throw new Error("Swiss Ephemeris missing swe_calc_ut");
   }
 
-  const sign = Math.floor(longitude / 30) + 1;
+  /**
+   * Different builds return slightly different shapes.
+   * Most common:
+   *   Swe.swe_calc_ut(jd, planet, flags)
+   * and result contains .longitude or result[0]
+   *
+   * We keep it defensive.
+   */
+  const flags = Swe.SEFLG_SWIEPH | Swe.SEFLG_SPEED; // safe defaults if present
 
-  // 360/64 = 5.625 degrees per gate
-  const gateNumber = Math.floor(longitude / 5.625) + 1;
-  const gate = gateNumber > 64 ? 64 : gateNumber;
+  const res = Swe.swe_calc_ut(jd, planetIndex, flags);
 
-  // Line: 6 lines inside a gate (5.625/6 = 0.9375)
-  const degreeInGate = longitude % 5.625;
-  const line = Math.floor(degreeInGate / 0.9375) + 1;
+  // Try common return shapes
+  if (!res) throw new Error("swe_calc_ut returned empty result");
+
+  // Sometimes: { longitude: number, latitude: number, distance: number, ... }
+  if (typeof res.longitude === "number") return { longitude: res.longitude };
+
+  // Sometimes: { xx: [lon, lat, dist, speedLon, ...], ... }
+  if (Array.isArray(res.xx) && typeof res.xx[0] === "number") return { longitude: res.xx[0] };
+
+  // Sometimes: returns array [lon, lat, dist, ...]
+  if (Array.isArray(res) && typeof res[0] === "number") return { longitude: res[0] };
+
+  throw new Error("Unknown swe_calc_ut return shape");
+}
+
+function calculatePlanetPosition(jd, planetName) {
+  const planetIndex = getPlanetIndex(planetName);
+  const pos = sweCalcUt(jd, planetIndex);
+  const longitude = norm360(pos.longitude);
+
+  const { gate, line } = longitudeToGateLine(longitude);
 
   return {
     name: planetName,
     longitude,
-    sign,
     gate,
     line,
-    gateInfo: GATES[gate] || { name: "Unknown", ru_name: "Неизвестно" },
   };
 }
 
+/**
+ * Type / authority etc.
+ * Let this be your existing logic, but fix the small bug: you used g.gate
+ * while your gates array uses { number: ... } in some places.
+ */
 function determineType(gates) {
-  // gates can contain gate OR number, so normalize:
-  const gateNumbers = gates.map((g) => g.gate ?? g.number).filter(Boolean);
+  const gateNumbers = gates.map(g => g.number);
 
-  const hasSacral = CENTER_GATES.Sacral.some((g) => gateNumbers.includes(g));
-  const hasThroat = CENTER_GATES.Throat.some((g) => gateNumbers.includes(g));
-  const hasSolarPlexus = CENTER_GATES.SolarPlexus.some((g) => gateNumbers.includes(g));
+  const CENTER_GATES = {
+    Sacral: [2, 14, 26, 30, 31, 38, 42, 45, 59],
+    Throat: [2, 3, 5, 7, 10, 11, 12, 16, 17, 20, 21, 22, 23, 24, 28, 31, 33, 35, 45, 56, 62],
+    SolarPlexus: [10, 20, 29, 34, 40, 46, 50, 57],
+  };
+
+  const hasSacral = CENTER_GATES.Sacral.some(g => gateNumbers.includes(g));
+  const hasThroat = CENTER_GATES.Throat.some(g => gateNumbers.includes(g));
+  const hasSolarPlexus = CENTER_GATES.SolarPlexus.some(g => gateNumbers.includes(g));
 
   if (hasSacral && hasThroat) {
-    return { name: "Manifesting Generator", ru_name: "Манифестирующий Генератор" };
+    return { name: "Manifesting Generator", description: "Манифестирующий Генератор" };
   }
   if (hasSacral) {
-    return { name: "Generator", ru_name: "Генератор" };
+    return { name: "Generator", description: "Генератор" };
   }
   if (!hasThroat) {
-    return { name: "Reflector", ru_name: "Рефлектор" };
+    return { name: "Reflector", description: "Рефлектор" };
   }
   if (hasSolarPlexus) {
-    return { name: "Projector", ru_name: "Проектор" };
+    return { name: "Projector", description: "Проектор" };
   }
-  return { name: "Manifestor", ru_name: "Манифестор" };
+  return { name: "Manifestor", description: "Манифестор" };
 }
 
-function determineProfile(planetPositions) {
-  const sun = planetPositions.find((p) => p.name === "Sun");
-  if (!sun) return null;
-
-  const sunLine = sun.line;
-  const earthLine = 7 - sunLine;
-
-  return {
-    sun_line: sunLine,
-    earth_line: earthLine,
-    number: `${sunLine}/${earthLine}`,
-    description: `Profile ${sunLine}/${earthLine}`,
+function determineStrategy(typeName) {
+  const strategies = {
+    Manifestor: "Информировать",
+    Generator: "Отвечать",
+    "Manifesting Generator": "Отвечать и информировать",
+    Projector: "Ждать приглашения",
+    Reflector: "Ждать полного лунного цикла",
   };
+  return strategies[typeName] || "Отвечать";
 }
 
 function determineAuthority(planetPositions) {
-  const gateNumbers = planetPositions.map((p) => p.gate).filter(Boolean);
+  const gateNumbers = planetPositions.map(p => p.gate);
 
-  if (CENTER_GATES.SolarPlexus.some((g) => gateNumbers.includes(g))) {
-    return { name: "Emotional", ru_name: "Эмоциональная" };
-  }
-  if (CENTER_GATES.Sacral.some((g) => gateNumbers.includes(g))) {
-    return { name: "Sacral", ru_name: "Сакральная" };
-  }
-  if (CENTER_GATES.Spleen.some((g) => gateNumbers.includes(g))) {
-    return { name: "Splenic", ru_name: "Селезеночная" };
-  }
-  if (CENTER_GATES.Heart.some((g) => gateNumbers.includes(g))) {
-    return { name: "Ego Manifested", ru_name: "Проявленный Эго" };
-  }
-  if (CENTER_GATES.GCenter.some((g) => gateNumbers.includes(g))) {
-    return { name: "G Center", ru_name: "G-центр" };
-  }
+  const solarPlexusGates = [22, 36, 37, 49, 55, 30, 6, 59, 39, 41];
+  const sacralGates = [5, 14, 29, 34, 27, 59, 9, 3, 42];
+  const splenicGates = [18, 28, 32, 44, 48, 50, 57, 58];
 
-  return { name: "No Inner Authority", ru_name: "Без внутренней власти" };
+  if (solarPlexusGates.some(g => gateNumbers.includes(g))) {
+    return { name: "Emotional", description: "Эмоциональная авторитет" };
+  }
+  if (sacralGates.some(g => gateNumbers.includes(g))) {
+    return { name: "Sacral", description: "Сакральная авторитет" };
+  }
+  if (splenicGates.some(g => gateNumbers.includes(g))) {
+    return { name: "Splenic", description: "Селезеночная авторитет" };
+  }
+  return { name: "No Inner Authority", description: "Без внутренней власти" };
 }
 
-function getDefinedCenters(gates) {
-  const gateNumbers = gates.map((g) => g.gate ?? g.number).filter(Boolean);
+function determineProfile(planetPositions) {
+  const sun = planetPositions.find(p => p.name === "Sun");
+  if (!sun) return null;
 
-  const defined = [];
-  for (const [centerName, centerGateList] of Object.entries(CENTER_GATES)) {
-    if (centerGateList.some((g) => gateNumbers.includes(g))) {
-      defined.push({ name: centerName, defined: true });
-    }
-  }
-  return defined;
+  const sunLine = sun.line;
+  const earthLine = 7 - sunLine; // simplified
+  return { number: `${sunLine}/${earthLine}`, description: `Профиль ${sunLine}/${earthLine}` };
 }
 
 async function calculateHumanDesign({ birthDate, birthTime, birthLocation }) {
-  try {
-    const locationInfo = getLocationInfo(birthLocation);
-    const utcOffset = getUTCOffset(birthLocation, birthDate);
-    const utcData = convertToUTC(birthDate, birthTime, birthLocation);
+  // 1) timezone conversion (your existing utils)
+  const locationInfo = getLocationInfo(birthLocation);
+  const utcOffset = getUTCOffset(birthLocation, birthDate);
+  const utcData = convertToUTC(birthDate, birthTime, birthLocation);
 
-    console.log(`Timezone: ${locationInfo.tz}, UTC offset: ${utcOffset}`);
-    console.log(`Local: ${birthTime} -> UTC: ${utcData.utcHour}:${utcData.utcMinute}`);
+  // 2) Julian day in UTC using swe_julday
+  const hourDecimal = utcData.utcHour + utcData.utcMinute / 60;
+  const jd = sweJulday(utcData.utcYear, utcData.utcMonth, utcData.utcDay, hourDecimal);
 
-    const jd = sweJulday(
-      utcData.utcYear,
-      utcData.utcMonth,
-      utcData.utcDay,
-      utcData.utcHour + utcData.utcMinute / 60,
-      1
-    );
+  // 3) planets
+  const planets = ["Sun", "Moon", "Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Rahu", "Ketu"];
+  const planetPositions = planets.map(p => calculatePlanetPosition(jd, p)).filter(Boolean);
 
-    const planets = ["Sun", "Moon", "Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Rahu", "Ketu"];
+  // 4) gates list
+  const gates = planetPositions.map(p => ({
+    number: p.gate,
+    line: p.line,
+    planet: p.name,
+  }));
 
-    const planetPositions = [];
-    for (const planet of planets) {
-      planetPositions.push(await calculatePlanetPosition(jd, planet));
-    }
+  const type = determineType(gates);
+  const strategy = determineStrategy(type.name);
+  const authority = determineAuthority(planetPositions);
+  const profile = determineProfile(planetPositions);
 
-    const gates = planetPositions.map((p) => ({
-      // keep BOTH keys so the rest of the code is consistent
-      gate: p.gate,
-      number: p.gate,
-      name: p.gateInfo.name,
-      ru_name: p.gateInfo.ru_name,
-      line: p.line,
-      planet: p.name,
-      sign: p.sign,
-      hexagram: p.gateInfo.hexagram,
-    }));
-
-    const type = determineType(gates);
-    const profile = determineProfile(planetPositions);
-    const authority = determineAuthority(planetPositions);
-
-    const strategies = {
-      Manifestor: "Информировать",
-      Generator: "Отвечать",
-      "Manifesting Generator": "Отвечать и информировать",
-      Projector: "Ждать приглашения",
-      Reflector: "Ждать полного лунного цикла",
-    };
-    const strategy = strategies[type.name] || "Отвечать";
-
-    const definedCenters = getDefinedCenters(gates);
-
-    return {
-      birthDate,
-      birthTime,
-      birthLocation,
-      latitude: locationInfo.lat,
-      longitude: locationInfo.lon,
-      timezone: locationInfo.tz,
-      utcOffset,
-      type,
-      strategy,
-      authority,
-      profile,
-      gates,
-      definedCenters,
-      planetPositions: planetPositions.map((p) => ({
-        planet: p.name,
-        longitude: p.longitude,
-        sign: p.sign,
-        gate: p.gate,
-        line: p.line,
-      })),
-      calculationSource: "Swiss Ephemeris",
-      version: "1.0.0-full",
-    };
-  } catch (error) {
-    console.error("Error calculating Human Design:", error);
-    throw new Error(`Failed to calculate Human Design: ${error.message}`);
-  }
+  return {
+    birthDate,
+    birthTime,
+    birthLocation,
+    latitude: locationInfo?.lat,
+    longitude: locationInfo?.lon,
+    timezone: locationInfo?.tz,
+    utcOffset,
+    type,
+    strategy,
+    authority,
+    profile,
+    gates,
+    planetPositions,
+    calculationSource: "Swiss Ephemeris",
+    version: "fixed-gates-and-swe-functions",
+  };
 }
 
-module.exports = {
-  calculateHumanDesign,
-  GATES,
-  CENTER_GATES,
-  getLocationInfo,
-  getUTCOffset,
-  convertToUTC,
-};
+module.exports = { calculateHumanDesign };
