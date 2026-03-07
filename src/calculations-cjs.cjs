@@ -17,9 +17,8 @@ const {
 const GATE_SIZE = 360 / 64;      // 5.625
 const LINE_SIZE = GATE_SIZE / 6; // 0.9375
 
-// Standard start used in most HD implementations:
-// Gate 41.1 starts at 0° Aquarius = 300° tropical longitude
-const RAVE_START_LONGITUDE = 300;
+// Calibrated to match Jovian Archive line boundaries
+const RAVE_START_LONGITUDE = 301.875;
 
 // Standard Rave Mandala sequence
 const RAVE_GATE_SEQUENCE = [
@@ -247,7 +246,6 @@ async function findDesignJd(personalityJd, personalitySunLon) {
 
     if (Math.abs(diff) < 0.0005) break;
 
-    // Sun moves approx 0.9856 deg/day
     guess -= diff / 0.9856;
   }
 
@@ -586,7 +584,7 @@ async function calculateHumanDesign({
       },
 
       calculationSource: "Swiss Ephemeris + Rave Mandala",
-      version: "2.0.0",
+      version: "2.1.0",
     };
   } catch (error) {
     console.error("Error calculating Human Design:", error);
