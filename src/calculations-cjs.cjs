@@ -1,10 +1,6 @@
 /**
  * Human Design calculations (CommonJS)
- * Fixed for:
- * - Swiss Ephemeris function names
- * - Rave Mandala gate order
- * - Design calculation (Sun 88 degrees earlier)
- * - Center / channel / type logic
+ * Swiss Ephemeris + Rave Mandala mapping
  */
 
 const swe = require("swisseph");
@@ -14,17 +10,18 @@ const {
   convertToUTC,
 } = require("./timezone-utils.cjs");
 
-/* --------------------------------
-   Basic constants
--------------------------------- */
+/* ---------------------------
+   Constants
+--------------------------- */
 
-const GATE_SIZE = 360 / 64; // 5.625
+const GATE_SIZE = 360 / 64;      // 5.625
 const LINE_SIZE = GATE_SIZE / 6; // 0.9375
 
-// Gate 41.1 starts at 0 Aquarius = 300 tropical longitude
+// Standard start used in most HD implementations:
+// Gate 41.1 starts at 0° Aquarius = 300° tropical longitude
 const RAVE_START_LONGITUDE = 300;
 
-// Standard Rave Mandala order
+// Standard Rave Mandala sequence
 const RAVE_GATE_SEQUENCE = [
   41, 19, 13, 49, 30, 55, 37, 63,
   22, 36, 25, 17, 21, 51, 42, 3,
@@ -48,15 +45,7 @@ const CENTER_ORDER = [
   "Root",
 ];
 
-// Enough metadata for output / compatibility
-const GATES = Object.fromEntries(
-  Array.from({ length: 64 }, (_, i) => [
-    i + 1,
-    { number: i + 1, name: `Gate ${i + 1}` },
-  ])
-);
-
-// Full channel list with connected centers
+// Full channel map
 const CHANNELS = [
   ["64", "47", "Head", "Ajna"],
   ["61", "24", "Head", "Ajna"],
@@ -115,14 +104,14 @@ const PLANETS = [
   { label: "North Node", id: swe.SE_TRUE_NODE || swe.SE_MEAN_NODE },
 ];
 
-// Swiss flags
+// Useful flags
 const IFLAGS =
   (typeof swe.SEFLG_SWIEPH === "number" ? swe.SEFLG_SWIEPH : 2) |
   (typeof swe.SEFLG_SPEED === "number" ? swe.SEFLG_SPEED : 256);
 
-/* --------------------------------
+/* ---------------------------
    Helpers
--------------------------------- */
+--------------------------- */
 
 function norm360(value) {
   let v = value % 360;
@@ -143,8 +132,6 @@ function channelKey(a, b) {
 
 function longitudeToGateLine(longitude) {
   const lon = norm360(longitude);
-
-  // shift wheel so 0 Aquarius = Gate 41.1
   const relative = norm360(lon - RAVE_START_LONGITUDE);
 
   const gateIndex = Math.floor(relative / GATE_SIZE);
@@ -153,16 +140,12 @@ function longitudeToGateLine(longitude) {
 
   const gate = RAVE_GATE_SEQUENCE[Math.max(0, Math.min(63, gateIndex))];
 
-  return {
-    gate,
-    line,
-    gateIndex,
-  };
+  return { gate, line };
 }
 
-/* --------------------------------
+/* ---------------------------
    Swiss Ephemeris wrappers
--------------------------------- */
+--------------------------- */
 
 function sweJulday(year, month, day, hourDecimal) {
   if (typeof swe.swe_julday !== "function") {
@@ -178,31 +161,20 @@ function sweCalcUt(jd, planetId) {
     }
 
     try {
-      // Most node-swisseph builds use callback style
       swe.swe_calc_ut(jd, planetId, IFLAGS, (res) => {
         if (!res) return reject(new Error("Empty response from swe_calc_ut"));
         if (res.error) return reject(new Error(res.error));
 
-        // common result shapes
         if (typeof res.longitude === "number") {
-          return resolve({
-            longitude: norm360(res.longitude),
-            raw: res,
-          });
+          return resolve(norm360(res.longitude));
         }
 
         if (Array.isArray(res.data) && typeof res.data[0] === "number") {
-          return resolve({
-            longitude: norm360(res.data[0]),
-            raw: res,
-          });
+          return resolve(norm360(res.data[0]));
         }
 
         if (Array.isArray(res.xx) && typeof res.xx[0] === "number") {
-          return resolve({
-            longitude: norm360(res.xx[0]),
-            raw: res,
-          });
+          return resolve(norm360(res.xx[0]));
         }
 
         return reject(
@@ -215,26 +187,24 @@ function sweCalcUt(jd, planetId) {
   });
 }
 
-/* --------------------------------
+/* ---------------------------
    Planet positions
--------------------------------- */
+--------------------------- */
 
-async function calculatePlanetPositions(jd) {
+async function calculatePlanetPositions(jd, source) {
   const positions = [];
-
   let northNodeLon = null;
 
   for (const planet of PLANETS) {
-    const result = await sweCalcUt(jd, planet.id);
-    const lon = result.longitude;
-
-    const gateInfo = longitudeToGateLine(lon);
+    const lon = await sweCalcUt(jd, planet.id);
+    const { gate, line } = longitudeToGateLine(lon);
 
     positions.push({
       planet: planet.label,
+      source,
       longitude: lon,
-      gate: gateInfo.gate,
-      line: gateInfo.line,
+      gate,
+      line,
     });
 
     if (planet.label === "North Node") {
@@ -244,13 +214,14 @@ async function calculatePlanetPositions(jd) {
 
   if (northNodeLon !== null) {
     const southLon = norm360(northNodeLon + 180);
-    const southGateInfo = longitudeToGateLine(southLon);
+    const southMap = longitudeToGateLine(southLon);
 
     positions.push({
       planet: "South Node",
+      source,
       longitude: southLon,
-      gate: southGateInfo.gate,
-      line: southGateInfo.line,
+      gate: southMap.gate,
+      line: southMap.line,
     });
   }
 
@@ -261,33 +232,31 @@ function earthFromSunLongitude(sunLon) {
   return norm360(sunLon + 180);
 }
 
-/* --------------------------------
+/* ---------------------------
    Design date search
-   Find moment where Sun is 88 degrees earlier
--------------------------------- */
+--------------------------- */
 
 async function findDesignJd(personalityJd, personalitySunLon) {
   const targetSun = norm360(personalitySunLon - 88);
 
-  // start with rough guess
   let guess = personalityJd - 88;
 
-  for (let i = 0; i < 14; i++) {
-    const sun = await sweCalcUt(guess, swe.SE_SUN);
-    const diff = signedAngleDiff(sun.longitude, targetSun);
+  for (let i = 0; i < 15; i++) {
+    const sunLon = await sweCalcUt(guess, swe.SE_SUN);
+    const diff = signedAngleDiff(sunLon, targetSun);
 
     if (Math.abs(diff) < 0.0005) break;
 
-    // Sun moves about 0.9856 degrees/day
+    // Sun moves approx 0.9856 deg/day
     guess -= diff / 0.9856;
   }
 
   return guess;
 }
 
-/* --------------------------------
+/* ---------------------------
    Gates, channels, centers
--------------------------------- */
+--------------------------- */
 
 function collectActiveGates(personalityPositions, designPositions, personalityEarth, designEarth) {
   const all = [
@@ -348,7 +317,7 @@ function buildCenterGraph(definedChannels) {
   return graph;
 }
 
-function isConnected(graph, start, targetSet) {
+function isConnected(graph, start, targets) {
   if (!graph.has(start)) return false;
 
   const queue = [start];
@@ -356,7 +325,7 @@ function isConnected(graph, start, targetSet) {
 
   while (queue.length) {
     const current = queue.shift();
-    if (targetSet.has(current)) return true;
+    if (targets.has(current)) return true;
 
     for (const next of graph.get(current) || []) {
       if (!seen.has(next)) {
@@ -422,27 +391,21 @@ function determineAuthority(typeName, definedCenters) {
   if (typeName === "Reflector") {
     return "Lunar";
   }
-
   if (definedCenters.has("SolarPlexus")) {
     return "Emotional - Solar Plexus";
   }
-
   if (definedCenters.has("Sacral")) {
     return "Sacral";
   }
-
   if (definedCenters.has("Spleen")) {
     return "Splenic";
   }
-
   if (definedCenters.has("Ego")) {
     return "Ego";
   }
-
   if (definedCenters.has("G")) {
     return "Self-Projected";
   }
-
   return "No Inner Authority";
 }
 
@@ -485,9 +448,9 @@ function determineIncarnationCross(personalitySun, personalityEarth, designSun, 
   return `(${personalitySun.gate}/${personalityEarth.gate} | ${designSun.gate}/${designEarth.gate})`;
 }
 
-/* --------------------------------
-   Main public function
--------------------------------- */
+/* ---------------------------
+   Public API
+--------------------------- */
 
 async function calculateHumanDesign({
   birthDate,
@@ -495,7 +458,6 @@ async function calculateHumanDesign({
   birthLocation,
 }) {
   try {
-    // Local -> UTC via your timezone utils
     const utcData = convertToUTC(birthDate, birthTime, birthLocation);
     const locationInfo = getLocationInfo(birthLocation);
     const utcOffset = getUTCOffset(birthLocation, birthDate);
@@ -507,46 +469,36 @@ async function calculateHumanDesign({
       Number(utcData.utcHour) + Number(utcData.utcMinute) / 60
     );
 
-    const personalityPositions = await calculatePlanetPositions(personalityJd);
+    const personalityPositions = await calculatePlanetPositions(personalityJd, "personality");
 
     const personalitySun = personalityPositions.find((p) => p.planet === "Sun");
     if (!personalitySun) throw new Error("Personality Sun not found");
 
     const personalityEarthLon = earthFromSunLongitude(personalitySun.longitude);
-    const personalityEarthGate = longitudeToGateLine(personalityEarthLon);
+    const personalityEarthMap = longitudeToGateLine(personalityEarthLon);
     const personalityEarth = {
       planet: "Earth",
       source: "personality",
       longitude: personalityEarthLon,
-      gate: personalityEarthGate.gate,
-      line: personalityEarthGate.line,
+      gate: personalityEarthMap.gate,
+      line: personalityEarthMap.line,
     };
 
-    // Mark personality planets
-    personalityPositions.forEach((p) => {
-      p.source = "personality";
-    });
-
     const designJd = await findDesignJd(personalityJd, personalitySun.longitude);
-    const designPositions = await calculatePlanetPositions(designJd);
+    const designPositions = await calculatePlanetPositions(designJd, "design");
 
     const designSun = designPositions.find((p) => p.planet === "Sun");
     if (!designSun) throw new Error("Design Sun not found");
 
     const designEarthLon = earthFromSunLongitude(designSun.longitude);
-    const designEarthGate = longitudeToGateLine(designEarthLon);
+    const designEarthMap = longitudeToGateLine(designEarthLon);
     const designEarth = {
       planet: "Earth",
       source: "design",
       longitude: designEarthLon,
-      gate: designEarthGate.gate,
-      line: designEarthGate.line,
+      gate: designEarthMap.gate,
+      line: designEarthMap.line,
     };
-
-    // Mark design planets
-    designPositions.forEach((p) => {
-      p.source = "design";
-    });
 
     const activeGates = collectActiveGates(
       personalityPositions,
@@ -568,17 +520,15 @@ async function calculateHumanDesign({
       designEarth
     );
 
-    // Flatten gates for frontend
     const gates = [];
     for (const [gateNumber, activations] of activeGates.entries()) {
       for (const act of activations) {
         gates.push({
-          number: Number(gateNumber),
           gate: Number(gateNumber),
+          number: Number(gateNumber),
           line: act.line,
           planet: act.planet,
           source: act.source,
-          name: GATES[gateNumber]?.name || `Gate ${gateNumber}`,
         });
       }
     }
@@ -619,7 +569,6 @@ async function calculateHumanDesign({
         .map((name) => ({ name, defined: true })),
 
       definedChannels,
-
       gates,
 
       personality: {
@@ -647,6 +596,5 @@ async function calculateHumanDesign({
 
 module.exports = {
   calculateHumanDesign,
-  GATES,
   CHANNELS,
 };
