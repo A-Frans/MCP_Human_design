@@ -100,6 +100,9 @@ const PLANETS = [
   { label: "Mars", id: swe.SE_MARS },
   { label: "Jupiter", id: swe.SE_JUPITER },
   { label: "Saturn", id: swe.SE_SATURN },
+  { label: "Uranus", id: swe.SE_URANUS },
+  { label: "Neptune", id: swe.SE_NEPTUNE },
+  { label: "Pluto", id: swe.SE_PLUTO },
   { label: "North Node", id: swe.SE_TRUE_NODE || swe.SE_MEAN_NODE },
 ];
 
