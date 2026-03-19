@@ -14,7 +14,7 @@ const {
    Constants
 --------------------------- */
 
-const GATE_SIZE = 360 / 64;      // 5.625
+const GATE_SIZE = 360 / 64; // 5.625
 const LINE_SIZE = GATE_SIZE / 6; // 0.9375
 
 // Calibrated to match Jovian Archive line boundaries
@@ -456,9 +456,9 @@ async function calculateHumanDesign({
   birthLocation,
 }) {
   try {
-    const utcData = convertToUTC(birthDate, birthTime, birthLocation);
-    const locationInfo = getLocationInfo(birthLocation);
-    const utcOffset = getUTCOffset(birthLocation, birthDate);
+    const utcData = await convertToUTC(birthDate, birthTime, birthLocation);
+    const locationInfo = await getLocationInfo(birthLocation);
+    const utcOffset = await getUTCOffset(birthLocation, birthDate, birthTime);
 
     const personalityJd = sweJulday(
       Number(utcData.utcYear),
@@ -584,7 +584,7 @@ async function calculateHumanDesign({
       },
 
       calculationSource: "Swiss Ephemeris + Rave Mandala",
-      version: "2.1.0",
+      version: "2.2.0",
     };
   } catch (error) {
     console.error("Error calculating Human Design:", error);
