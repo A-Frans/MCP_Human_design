@@ -1,64 +1,83 @@
-/**
- * Утилиты для работы с часовыми поясами
- * Обертка над полной базой данных timezone
- */
+const tzlookup = require("tz-lookup");
+const { DateTime } = require("luxon");
+const NodeGeocoder = require("node-geocoder");
 
-const tzDB = require('./timezone-database.cjs');
+const geocoder = NodeGeocoder({
+  provider: "openstreetmap",
+});
 
-/**
- * Определить часовой пояс и координаты по названию города
- */
-function getLocationInfo(cityName) {
-  const result = tzDB.findTimezoneByCity(cityName);
+async function getLocationInfo(cityName) {
+  const results = await geocoder.geocode(cityName);
+
+  if (!results || results.length === 0) {
+    throw new Error(`Plaats niet gevonden: ${cityName}`);
+  }
+
+  const best = results[0];
+  const latitude = best.latitude;
+  const longitude = best.longitude;
+  const timezone = tzlookup(latitude, longitude);
+
   return {
-    city: result.city || cityName,
-    tz: result.timezone,
-    lat: result.latitude,
-    lon: result.longitude
+    city: best.city || cityName,
+    tz: timezone,
+    lat: latitude,
+    lon: longitude,
   };
 }
 
-/**
- * Определить UTC offset для даты (учитывая DST)
- */
-function getUTCOffset(cityName, birthDate) {
-  const locationInfo = getLocationInfo(cityName);
-  const offsetData = tzDB.getUTCOffsetWithDST(birthDate, locationInfo.tz);
-  return offsetData.offset;
+async function getUTCOffset(cityName, birthDate, birthTime = "12:00") {
+  const locationInfo = await getLocationInfo(cityName);
+
+  const dt = DateTime.fromISO(`${birthDate}T${birthTime}`, {
+    zone: locationInfo.tz,
+  });
+
+  if (!dt.isValid) {
+    throw new Error(`Ongeldige datum/tijd: ${birthDate} ${birthTime}`);
+  }
+
+  return dt.offset / 60;
 }
 
-/**
- * Конвертировать local time в UTC
- */
-function localTimeToUTC(localTime, utcOffset) {
-  const [hour, minute] = localTime.split(':').map(Number);
-  const utcHour = hour - utcOffset;
-  
-  // Обработка перехода через полуночь
-  let adjustedHour = utcHour;
-  if (adjustedHour < 0) adjustedHour += 24;
-  if (adjustedHour >= 24) adjustedHour -= 24;
-  
+async function localTimeToUTC(localTime, utcOffset) {
+  const [hour, minute] = localTime.split(":").map(Number);
+  let utcHour = hour - utcOffset;
+
+  if (utcHour < 0) utcHour += 24;
+  if (utcHour >= 24) utcHour -= 24;
+
   return {
-    hour: adjustedHour,
-    minute: minute,
-    offset: utcOffset
+    hour: utcHour,
+    minute,
+    offset: utcOffset,
   };
 }
 
-/**
- * Конвертировать local time в UTC (с учетом даты)
- */
-function convertToUTC(birthDate, birthTime, cityName) {
-  const fullResult = tzDB.convertLocalToUTC(birthDate, birthTime, cityName);
+async function convertToUTC(birthDate, birthTime, cityName) {
+  const locationInfo = await getLocationInfo(cityName);
+
+  const localDateTime = DateTime.fromISO(`${birthDate}T${birthTime}`, {
+    zone: locationInfo.tz,
+  });
+
+  if (!localDateTime.isValid) {
+    throw new Error(`Ongeldige datum/tijd: ${birthDate} ${birthTime}`);
+  }
+
+  const utc = localDateTime.toUTC();
+
   return {
-    utcYear: fullResult.utcYear,
-    utcMonth: fullResult.utcMonth,
-    utcDay: fullResult.utcDay,
-    utcHour: fullResult.utcHour,
-    utcMinute: fullResult.utcMinute,
-    offset: fullResult.localOffset,
-    originalLocalTime: fullResult.originalLocalTime
+    utcYear: utc.year,
+    utcMonth: utc.month,
+    utcDay: utc.day,
+    utcHour: utc.hour,
+    utcMinute: utc.minute,
+    offset: localDateTime.offset / 60,
+    originalLocalTime: birthTime,
+    timezone: locationInfo.tz,
+    latitude: locationInfo.lat,
+    longitude: locationInfo.lon,
   };
 }
 
@@ -66,6 +85,5 @@ module.exports = {
   getLocationInfo,
   getUTCOffset,
   localTimeToUTC,
-  convertToUTC
+  convertToUTC,
 };
-
